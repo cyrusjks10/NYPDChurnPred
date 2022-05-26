@@ -1,0 +1,787 @@
+---
+title: "Project 1"
+author: "Abigail Rooney and Cyrus Jackson"
+date: "3/02/2021"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+    theme: paper
+  pdf_document:
+    toc: yes
+---
+
+```{r SETUP, message=FALSE, warning=FALSE}
+
+# required packages
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("randomForest")) install.packages("randomForest")
+if (!require("data.table")) install.packages("data.table")
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("caret")) install.packages("caret")
+if (!require("randomForest")) install.packages("randomForest")
+if (!require("pscl")) install.packages("pscl")
+
+# required datasets
+nyc_payroll <- fread('Citywide_Payroll_Data__Fiscal_Year_.csv',
+                     stringsAsFactors = F)
+
+misconduct <- fread('allegations.csv',
+                     stringsAsFactors = F)
+
+crime_data <- fread("crime_data.csv",
+                    stringsAsFactors=F)
+```
+
+# Introduction
+
+-  We will be exploring the Citywide Payroll Data (Fiscal Year) avaiable via [NYC Open Data](https://data.cityofnewyork.us/City-Government/Citywide-Payroll-Data-Fiscal-Year-/k397-673e). This dataset contains longitduinal data about the compensation of employees, which departments they work for, their title, and other relevant information. We have filtered the data to include all employees of the New York City Police Department for which municipal payroll data is available, using the NYC Open Data Portal to select all rows for which the department was 'Police Department'. This leaves us with a dataset totaling `r nrow(nyc_payroll)` rows. The dataset includes data spanning from ` r min(nyc_payroll$`Fiscal Year`)` to ` r max(nyc_payroll$`Fiscal Year`)`. 
+
+# EDA
+The data set contains the columns that we mention below. 
+
+- **Fiscal Year**: Measured July 1 – June 30, the fiscal year is recorded as the year in which the fiscal year ends (for example, the fiscal year from July 1, 2013 – June 30, 2014, is recorded simply as 2014). These values range from 2014 to 2021 in this data set. 
+
+- **Agency Name**: We can remove this column for the purposes of our analysis, as the only value in this column is “Police Department.” 
+
+
+- **First Name, Middle Initial, and Last Name**: These three columns contain the first names, middle initials, and last names of employees. We can concatenate these three columns to create a single column that streamlines all of this information. We can also combine this information with each employee’s agency start date, which provides a unique identifier to account for cases in which two employees have the same name. We will call this column “identif_col”, short for identifier. 
+
+- **Payroll Number**: NYC OpenData does not provide detailed information about what this column measures. The two unique values in this column of the data set, subset to only include police department data, are 56 and NA. The number 56 must refer to the police department’s payroll; in any case, we can remove this column because it does not seem useful for our analysis. 
+
+
+- **Agency Start Date**: This column records when an employee started working for the police department in the format MM/DD/YYYY, as a character string. We can convert these values to datetime objects to be more useful to our analysis. As mentioned above, we will also include this value as a character string as part of the identifier column. 
+
+- **Work Location Borough**: The unique values in this column are the five boroughs of New York City: Manhattan, Brooklyn, Bronx, Queens, and Richmond (popularly known as Staten Island). Some values are also empty strings. We considered removing rows that contain an empty value for Work Location Borough, but we realized that some positions may not be tied to an office in a particular borough, and whether an employee holds one of these positions might be a predictor of worker churn, so we decided to leave all values for Work Location Borough in the data set. 
+
+- **Title Description**: There are 325 unique title descriptions in this data set, which range from police officer to surgeon to attorney at law to plumber, and many more titles in between. We might want to create a binary variable that records whether an employee is an officer or not, since whether an employee is in the direct line of duty may help us predict whether that employee will leave the agency after a short period. 
+
+- **Leave Status as of June 30**: The values for this variable are “Ceased,” “Active,” “On Leave,” “On Separation Leave,” and “Seasonal.” For the purposes of our analysis, we will consider employees whose status is “Ceased” as no longer working for the agency; any other status indicates that the employee is technically still working for the agency, so the employee does not contribute to worker turnover. 
+
+- **Base Salary**: This column records employees’ base salaries as numeric values. 
+
+- **Pay Basis**: The unique values in this column are “per Annum,” “per Day,” “per Hour,” and “Prorated Annual.”
+
+- **Regular Hours**: This column records the number of regular hours (as opposed to overtime hours) that each employee has worked in the fiscal year as a numeric value.
+EXPLAIN how/why we changed negative values to NAs
+
+- **Regular Gross Paid**: NYC OpenData defines this column as recording the amount paid to the employee for the base salary during the fiscal year. 
+
+- **OT Hours**: This column records the number of overtime hours that each employee has worked during the fiscal year as a numeric value. 
+
+- **Total OT Paid**: This column records the amount paid to each employee for working overtime in each fiscal year. 
+
+**Total Other Pay**: NYC OpenData says that this column “includes any compensation in addition to gross salary and overtime pay, i.e. differentials, lump sums, uniform allowance, meal allowance, retroactive pay increases, settlement amounts, and bonus pay, if applicable.” 
+
+## Data Cleaning
+```{r}
+head(nyc_payroll)
+
+# column names have spaces. replace them with underscores
+names(nyc_payroll) <- gsub(" ", "_", names(nyc_payroll))
+
+# first name, last name, and middle initial are separate columns.
+# We will combine first, middle, and last names into one column
+
+nyc_payroll$Name <- paste(nyc_payroll$First_Name, nyc_payroll$Mid_Init, 
+                          nyc_payroll$Last_Name)
+
+
+## convert agency start date to proper data format
+nyc_payroll$agency_start_date <- as.POSIXct(nyc_payroll$Agency_Start_Date,
+                                            tz='GMT', 
+                                            format='%m/%d/%Y')
+
+
+## convert agency start date to agency start fiscal year
+
+nyc_payroll$agency_start_fy <- as.numeric(format(nyc_payroll$agency_start_date ,
+                                                 "%Y")) + 
+  (format(nyc_payroll$agency_start_date , "%m") >= "07")
+
+# create identifier column, since people can have the same name
+nyc_payroll$identif_col <- paste(nyc_payroll$Name,
+                                 as.character(nyc_payroll$Agency_Start_Date))
+
+
+# many do have the same name, we display the most common ones
+head(nyc_payroll %>% count(Name,sort=T))
+
+#we see that some employees  do not have a name.
+#we check to see if this is a problem
+# if there are identifiers that appear more than once, this could be an issue
+head(nyc_payroll %>% count(identif_col,sort=T))
+
+# There are identifiers that appear many times in the data set
+# We replace observations for which no name was provided with NAs
+# Since we might not be able to distinguish between them
+
+
+nyc_payroll <- 
+  nyc_payroll[nyc_payroll$First_Name != "" & nyc_payroll$Last_Name!= "" ,]
+
+# we notice that a variable with total gross pay is missing
+# we create one
+
+nyc_payroll$total_gross_pay <- (nyc_payroll$Regular_Gross_Paid + 
+                                  nyc_payroll$Total_OT_Paid+
+                                  nyc_payroll$Total_Other_Pay)
+                  
+# we do a common sense check to make sure that the total gross pay is at least 0
+
+min(nyc_payroll$total_gross_pay)
+
+cat('\n There are',
+    nrow(nyc_payroll[nyc_payroll$total_gross_pay<0,]),
+    'rows where the total gross pay is less than zero')
+
+# checking other payment columns
+cat('\n There are',
+    nrow(nyc_payroll[nyc_payroll$Total_OT_Paid<0,]),
+    'rows where the total overtime pay is less than zero')
+
+# 
+cat('\n There are',
+    nrow(nyc_payroll[nyc_payroll$Total_Other_Pay<0,]),
+    'rows where the total other pay is less than zero')
+
+# we believe that negative payment is possible, due to internal accounting
+# records
+
+
+#inspecting columns involving time
+cat('\n There are',
+    nrow(nyc_payroll[nyc_payroll$Regular_Hours<0,]),
+    'rows where the regular hours is less than zero')
+
+cat('\n There are',
+    nrow(nyc_payroll[nyc_payroll$OT_Hours<0,]),
+    'rows where the overtime hours is less than zero')
+
+## we can remove these rows since we think these values are non-sensical
+nyc_payroll$Regular_Hours <- ifelse(nyc_payroll$Regular_Hours<0,NA,
+                                    nyc_payroll$Regular_Hours)
+
+nyc_payroll$OT_Hours <- ifelse(nyc_payroll$OT_Hours<0,NA,
+                                    nyc_payroll$OT_Hours)
+
+
+nyc_payroll <- nyc_payroll %>% select(-Payroll_Number, 
+                                      -Agency_Name)
+
+head(nyc_payroll)
+
+```
+
+
+
+## Engineering the churn variable
+
+- To engineer the churn variable, we split the data into three groups, based on the year that they joined and the agency. We are interested in whether individuals churn after one or two years in the time period that we are able to observe them, which spans from Fiscal Year 2014 to Fiscal Year 2021. We split the data into three groups to reflect the fact that we are not able to observe all employees in the data for at least three years, since new employees join every year.
+
+- As our first group, we consider those who joined the police department prior to fiscal year 2020. 
+
+  - For these individuals, we expect that we could see between 3-6 records for them, which would indicate that they did not churn. Recall that our NYC Payroll dataset covers the period from fiscal year 2014 to fiscal year 2021. Even if someone joined in the fiscal year of 2019, we could observe them up to three times in our dataset, for the fiscal years of 2019, 2020, and 2021. If an employee joined the police department, in as early as 2014 or even earlier, we could observe them 8 times in our dataset.
+
+  - To calculate whether or not individuals prior to 2020 churned, we group our dataset by the indentifs_col and calculate how many times they appeared in the dataset. We add an individual’s identifier to a vector if they appeared less than 3 times in the dataset.
+
+```{r}
+# get unique identifiers of those who joined before 2020 and did churn in 1
+# or 2 years
+
+identifs_did_churn_pre_2020 <- nyc_payroll %>% 
+                               filter(agency_start_fy < 2020) %>%
+                               count(identif_col) %>% 
+                               filter(n < 3) %>% 
+                               select(identif_col)
+
+uniq_identifs_did_churn_pre_2020 <- 
+  unique(identifs_did_churn_pre_2020$identif_col)
+
+
+# get unique identifiers of those who joined in 2021 and did churn in 1 year
+
+identifs_already_churned_2020 <- nyc_payroll %>% 
+                                 filter(agency_start_fy == 2020) %>%
+                                 count(identif_col) %>% 
+                                 filter(n < 2) %>% 
+                                 select(identif_col)
+
+identifs_already_churned_2020 <- 
+  unique(identifs_already_churned_2020$identif_col)
+
+all_identifs_pre_2020_df <- nyc_payroll %>% 
+                            filter(agency_start_fy < 2020) %>% 
+                            select(identif_col)
+
+all_identifs_pre_2020 <- unique(all_identifs_pre_2020_df$identif_col)
+
+prop_churned_pre_2020 <- length(identifs_already_churned_2020 ) /
+  length(all_identifs_pre_2020)
+
+print(prop_churned_pre_2020)
+
+```
+
+- As our second group, we consider those who joined the police department in the fiscal year of 2020.
+  - For these individuals, we could see up to two records for them. We add them to a vector that contains the identifiers of those that churned if they appeared less than 2 times in the dataset to capture the individuals who already churned.
+```{r}
+# get unique identifiers of those who joined before 2020 and did churn in 1
+# or 2 years
+
+identifs_did_churn_pre_2020 <- nyc_payroll %>% 
+                               filter(agency_start_fy < 2020) %>%
+                               count(identif_col) %>% 
+                               filter(n < 3) %>% 
+                               select(identif_col)
+
+uniq_identifs_did_churn_pre_2020 <- 
+  unique(identifs_did_churn_pre_2020$identif_col)
+
+```
+  
+- As our third group, we consider those who joined the police department in the year of 2021.
+  - For these individuals, we could see up to one record for them. We add them to a vector that contains the identifiers of those that churned if their leave status before the end of fiscal year 2021 was ‘CEASED’. Our exploratory data analysis has suggested that a leave status of ‘CEASED’ indicates that someone has retired, quit, or fired. We have found that those whose leave status has changed to ‘CEASED’ before the end of the fiscal year are not observed in the next fiscal year. 
+  - We are making the assumption that those who have not yet churned and joined the agency in 2020 or 2021 will not churn. When we calculated the churn rate for those who joined the agency prior to 2020, we found that the churn rate was between 0-10%, so we feel confident making this assumption. We should not that the years of 2020 and 2021 are the years in which Covid-19 was an emergent and active pandemic. This assumption might not be reasonable
+
+
+```{r}
+
+# get unique identifiers of those who joined before 2020 and did churn in 1
+# or 2 years
+
+identifs_did_churn_pre_2020 <- nyc_payroll %>% 
+                               filter(agency_start_fy < 2020) %>%
+                               count(identif_col) %>% 
+                               filter(n < 3) %>% 
+                               select(identif_col)
+
+uniq_identifs_did_churn_pre_2020 <- 
+  unique(identifs_did_churn_pre_2020$identif_col)
+
+
+# get unique identifiers of those who joined in 2021 and did churn in 1 year
+
+identifs_already_churned_2020 <- nyc_payroll %>% 
+                                 filter(agency_start_fy == 2020) %>%
+                                 count(identif_col) %>% 
+                                 filter(n < 2) %>% 
+                                 select(identif_col)
+
+identifs_already_churned_2020 <- 
+  unique(identifs_already_churned_2020$identif_col)
+
+
+
+# get unique identifiers of those who joined the agency in the yaer of 2021 
+# and have already churned by taking permanent leave
+
+identifs_already_churned_yr_2021 <- nyc_payroll %>% 
+                                filter(agency_start_fy == 2021 &
+                                Leave_Status_as_of_June_30=='CEASED' ) %>% 
+                                select(identif_col)
+
+identifs_already_churned_2021 <- 
+  unique(identifs_already_churned_yr_2021$identif_col)
+
+all_identifs_churned <- unique(c(uniq_identifs_did_churn_pre_2020,
+                                 identifs_already_churned_2020,
+                                 identifs_already_churned_2021))
+
+
+nyc_payroll$did_churn <- 
+  ifelse(nyc_payroll$identif_col %in% all_identifs_churned, 1, 0)
+
+head(nyc_payroll)
+                             
+```
+## Dataset features and complexities
+
+```{r}
+# Have many employees are in this dataset? 
+cat('There are', length(unique(nyc_payroll$identif_col)), 'employees in the 
+dataset \n')
+
+# What percent of rows are NAs?
+propr_NAs <- round(sum(is.na(nyc_payroll))/prod(dim(nyc_payroll)),3)*100
+cat(propr_NAs,'percent of rows contain NAs')
+
+# Who was the highest paid municipal employee? 
+nyc_payroll[which.max(nyc_payroll$total_gross_pay),
+            c('identif_col','Fiscal_Year','total_gross_pay')]
+
+# What does the distribution of total_gross_pay look like?
+hist(nyc_payroll$total_gross_pay) # it's not skewed right, surprisingly
+
+# What does the distribution of base salaries look like?
+hist(nyc_payroll$Base_Salary) # it's skewed right, as you would expect
+
+# median total_gross_pay over time
+median_gross_pay_over_time <- aggregate(nyc_payroll$total_gross_pay, 
+                                        list(nyc_payroll$Fiscal_Year), 
+                                        FUN=median,na.rm=T)
+
+# median total_gross_pay by title, over all time periods
+median_total_gross_pay_by_title <- nyc_payroll %>% 
+                                   group_by(Title_Description,Fiscal_Year) %>% 
+                                   summarise(median_total_gross_pay= 
+                                   median(total_gross_pay,na.rm = T))
+
+head(median_total_gross_pay_by_title[order(
+  -median_total_gross_pay_by_title$median_total_gross_pay),])
+
+#  median total_gross_pay by borough, over all time periods
+nyc_payroll %>% group_by(Work_Location_Borough,Fiscal_Year) %>% 
+            summarise(median_pay= median(total_gross_pay,na.rm = T))
+
+
+# What is the average number of years that employees stay with the department?
+numb_years_per_employee <- nyc_payroll %>% count(identif_col,sort=T)
+avg_numb_years_per_employee <- mean(numb_years_per_employee$n,na.rm=T)
+cat("\n On average, an employee stays with the Police Department for",
+    round(avg_numb_years_per_employee,0),'years')
+
+# How many employees have stayed with the department for all 8 years observed?
+stayed_all_8_years <- nrow(numb_years_per_employee %>% filter(n==8))
+cat(stayed_all_8_years,'employees stayed all 8 years')
+
+
+
+```
+
+### Visualizations
+```{r}
+pay_over_time <- aggregate(nyc_payroll$total_gross_pay, list(nyc_payroll$Fiscal_Year), 
+          FUN=median,na.rm=T)
+
+plot(pay_over_time,type = "l",ylim=c(0,100000),
+     xlab = "Fiscal Year",
+     ylab = "Median Total Gross Pay")
+
+#visualizing aggregate data median pay over time by borough
+
+pay_over_time_borough <- aggregate(nyc_payroll$total_gross_pay, 
+                                   list(nyc_payroll$Fiscal_Year,
+                                        nyc_payroll$Work_Location_Borough), 
+          FUN=median,na.rm=T)
+names(pay_over_time_borough) <- c("Fiscal_Year","Work_Location_Borough",
+                                  "Median_Total_Gross_Pay")
+pay_over_time_borough <- 
+  pay_over_time_borough[pay_over_time_borough$Work_Location_Borough != "",]
+
+ggplot(data = pay_over_time_borough, 
+       aes(x = Fiscal_Year, 
+           y = Median_Total_Gross_Pay , 
+           color = Work_Location_Borough)) +
+        geom_point() +
+        labs(title = "Median Total Gross Pay Over Time",
+             x = "Fiscal Year",
+             y = "Median Total Gross Pay") +
+        xlim(2014, 2022) + 
+        ylim(0,1e+05)
+
+```
+
+## Examining Variable Relationships
+
+
+## Feature Engineering
+
+### Feature engineering of crime variable**
+We have accessed a data set from Kaggle that includes data about crime incidents from 2006-2019. We expect that our model will show a positive relationship between crime and churn, meaning that as crime increases churn increases. We hold the opinion that increases in crime, especially violent crime, are likely to result in more officers chruning because they may perceive that the risk the role poses to their lives might not be worth the pay.
+```{r}
+#Select columns of interest: 
+
+crime_data <- crime_data %>% subset(select = c(CMPLNT_NUM,
+                                               RPT_DT,
+                                               LAW_CAT_CD,
+                                               BORO_NM))
+#Convert report date to the correct fiscal year: 
+crime_data_dates <- as.POSIXlt(mdy(crime_data$RPT_DT))
+crime_data_FY <- crime_data_dates$year + (crime_data_dates$mo >= 6) + 1900 
+crime_data$`Fiscal Year` <- crime_data_FY
+
+#Convert BORO_NM to match Work Location Borough column in main data set: 
+
+names(crime_data)[names(crime_data) == "BORO_NM"] <- "Work Location Borough"
+
+crime_data[crime_data == "STATEN ISLAND"] <- "RICHMOND"
+crime_data <- crime_data[crime_data$`Work Location Borough` != "",]
+
+#Subset crime data set to only include data from FY 2014-2019:
+fiscal_years <- c(2014:2019)
+#crime_data <- crime_data[crime_data$`Fiscal Year` %in% fiscal_years,]
+
+#Calculate number of crimes and number of felonies per fiscal year, by borough:
+boroughs <- unique(crime_data$`Work Location Borough`)
+
+fiscal_years_col <- c()
+borough_col <- c()
+crime_count_col <- c()
+felony_count_col <- c()
+
+row_num <- 1
+
+for(i in seq_along(fiscal_years)){
+    year <- fiscal_years[i]
+    year_data <- crime_data[crime_data$`Fiscal Year` == year,]
+    for(k in seq_along(boroughs)){
+        borough <- boroughs[k]
+        borough_data <- year_data[year_data$`Work Location Borough` == borough,]
+        num_crimes <- nrow(borough_data)
+        felony_data <- borough_data[borough_data$LAW_CAT_CD == "FELONY",]
+        num_felonies <- nrow(felony_data)
+        fiscal_years_col[row_num] <- year
+        borough_col[row_num] <- borough
+        crime_count_col[row_num] <- num_crimes
+        felony_count_col[row_num] <- num_felonies
+        row_num <- row_num + 1
+    }
+}
+
+crime_counts <- cbind.data.frame(fiscal_years_col,borough_col,
+                                 crime_count_col,felony_count_col)
+
+col_names <- c("Fiscal Year","Work Location Borough","Total Crime Count",
+               "Felony Count")
+
+names(crime_counts) <- col_names
+head(crime_counts)
+
+# get median crime counts by borough over the years from 2014-2019
+
+crime_counts_medians <-  crime_counts %>%
+  group_by(`Work Location Borough`) %>%
+  summarise_at(vars(`Total Crime Count`), 
+  list(median_total_crime_count = median), na.rm=T)
+
+crime_counts_medians$median_total_crime_count <- 
+  as.integer(crime_counts_medians$median_total_crime_count)
+
+
+head(crime_counts_medians)
+```
+
+
+**Feature engineering of misconduct variable**
+We engineer a second variable that indicates whether an officer that we observed from the time period our data spans has been accused of misconduct. We suspect that a percentage of police officers who are consistently accused of misconduct might be asked to resign from their role. That is to say that we expect that there is a positive relationship between police misconduct and whether or not an employee churns.
+```{r}
+
+head(misconduct)
+
+# combine first and last name
+
+misconduct$Name <- paste(misconduct$first_name,misconduct$last_name)
+
+# get vector of all misconduct names in dataset
+vec_of_misconduct_names <- unique(toupper(misconduct$Name))
+
+# create first and last name variable
+nyc_payroll$first_and_last_name <- paste(nyc_payroll$First_Name,
+                                         nyc_payroll$Last_Name)
+
+
+# if the names match between the two dataset, 1, else 0
+nyc_payroll$accused_of_misconduct <- 
+  ifelse(nyc_payroll$first_and_last_name %in% 
+                                              vec_of_misconduct_names,
+                                              1,0)
+
+#proportion of records accused of misconduct
+mean(nyc_payroll$accused_of_misconduct)
+
+```
+Approcimately 6.8 percent of records have been accused of misconduct.
+
+**Feature Engineering the in_line_of_duty variable**
+We engineer a variable that we hope reflects not just hierarchy, since police officers and cadets are less senior than detectives, sergeants, and captain but also reflect that police officers and cadets might be in the line of duty, which could affect whether or not they churn. Some officers and cadets might find the job to stressful, which could affect churn. WE expect that our model will show positive relationship between in_line_of_duty variable and churn. 
+```{r}
+nyc_payroll <- nyc_payroll %>%
+  add_column(LineOfDuty = NA)
+
+LineOfDuty <- rep(NA,length(nyc_payroll$Title_Description))
+
+for(i in seq_along(nyc_payroll$Title_Description)){
+    title <- nyc_payroll$Title_Description[i]
+    split_title <- strsplit(title," ")
+    if("OFFICER" %in% split_title[[1]] | "CADET" %in% split_title[[1]]){
+        LineOfDuty[i] <- 1
+    } else{
+        LineOfDuty[i] <- 0
+    }
+}
+
+nyc_payroll$LineOfDuty <- LineOfDuty
+
+check <- nyc_payroll[nyc_payroll$Title_Description == "POLICE OFFICER",]
+head(check)
+```
+
+We select additional variables from the nyc_payroll dataset that we think could be good features for a classification algorithm. We add them to a data frame that will contain all of the features we have theorized would help to predict churn.
+
+We theorize that work_location_borough might be a good predictor for churn since different boroughs might have different pay structures, advancement opportunities, and operations that could affect whether an employee churn.
+
+We theorize that Pay_Basis might be a good predictor for churn since hourly worker might receive less pay compared to salaried workers, which could affect whether or not the workers churn. Why hourly workers might churn at higher rates than salaried workers could be because the wages are often lower and thus many plan to stay in hourly positions until they can get a salaried position, causing them to churn.
+
+We theorize that agency_start_fy might be a good predictor for churn since the year an employee joined the department could be a proxy for the employee's age, which could suggest whether they are likely to retire if they are older or liekly to job hop or start a family if they are younger. 
+```{r}
+# select features of interest
+features_and_response <- nyc_payroll %>% select(identif_col,
+                       Work_Location_Borough, 
+                       Pay_Basis,
+                       agency_start_fy, 
+                       did_churn,
+                       accused_of_misconduct,
+                       LineOfDuty)
+
+# join crime_counts_medians variable to dataset with features and response vars
+features_and_response <- features_and_response %>% 
+  left_join(crime_counts_medians,
+            by = c('Work_Location_Borough'= 'Work Location Borough'))
+
+# calculate the median total gross pay by id
+median_total_gross_pay_by_id <- nyc_payroll %>%
+  group_by(identif_col) %>%
+  summarise_at(vars(total_gross_pay), 
+  list(median_total_gross_pay = median), na.rm=T)
+  
+  
+# calculate the median overtime hours worked by id
+median_overtime_hours_worked_by_id <- nyc_payroll %>%
+  group_by(identif_col) %>%
+  summarise_at(vars(OT_Hours), 
+  list(median_ot_hours_worked = median), na.rm=T)
+
+#join the median total gross pay by id data to data with features
+#and variables
+features_and_response <- features_and_response %>% 
+  left_join(median_total_gross_pay_by_id,by='identif_col')
+
+#join the median overtime hours worked by id data to data with features
+#and variables
+features_and_response  <- features_and_response %>% 
+  left_join(median_overtime_hours_worked_by_id,by='identif_col')
+
+# make sure that both of the engineered variables have
+features_and_response$median_total_gross_pay <- 
+  as.integer(features_and_response$median_total_gross_pay)
+features_and_response$median_ot_hours_worked <- 
+  as.integer(features_and_response$median_ot_hours_worked)
+
+features_and_response <- unique(features_and_response)
+
+nrow(features_and_response)
+head(features_and_response)
+```
+
+WE have also engineered variable pertaining to the median total gross pay of all employees taken over the years in which they appear in our dataset.We expect that a higher salary might translate to less churn, since employees that are payed higher salaries might be happier or feel valued and thus are more likely to continue being employed by the police department.That is to say that we expect that our model will indicate a negative relationship between an employees' median total gross pay taken over all the years for which we have observed them and whether the employee churns. 
+
+The median overtime hours worked by each employees over the time span for which we observed them was also calculated. We do not expect the relationship between this variable and whether an employee churned to be positive. Instead, we expect that our model shows that the relationship is negative, since an employee that works overtime frequently might feel exhausted and 'burn out', resulting in them churning. 
+
+
+**Getting training, validation, and testing sets.**
+
+We consider these features for our model:
+- The fiscal year that an employee joins an agency
+- The median of the total gross pay that each employee received over the years that they were observed in the dataset
+- The median overtime hours each employee worked over the years that they were observed in the dataset
+- The borough in which they were observed to work in
+- Their pay basis
+- Whether they were in the line of duty (classified as an officer or cadet)
+- Whether they were accused of police misconduct during the time period that we were able to observe them 
+- The median crime counts over the period from 2014-2019
+
+```{r}
+# first, we remove all rows with NAs, since our alogithm will ignore it
+features_and_response1 <- 
+  features_and_response[complete.cases(features_and_response),]
+
+# setting random seed for reproducibility
+set.seed(18)
+prop = mean(features_and_response1$did_churn, na.rm=T)
+print(prop)
+
+# create test set
+test_index <- createDataPartition(features_and_response1$did_churn,p=.20,list=F)
+test_df <- features_and_response1[test_index,]
+test_df <- test_df %>% select(-identif_col)
+mean(test_df$did_churn)
+
+# create train and validation sets
+train_df1 <-features_and_response1[-test_index,]
+validation_index <- createDataPartition(train_df1$did_churn,p=.10,list=F)
+validation_df <- train_df1[validation_index,]
+validation_df <-   validation_df %>% select(-identif_col)
+mean(validation_df$did_churn)
+train_df <- train_df1[-validation_index,]
+train_df <- train_df  %>% select(-identif_col)
+mean(validation_df$did_churn)
+
+# one hot encoding
+dummy <- dummyVars("~ .", data=train_df)
+train <- data.frame(predict(dummy, newdata = train_df)) 
+
+dummy <- dummyVars("~ .", data=validation_df)
+validation <- data.frame(predict(dummy, newdata = validation_df)) 
+
+dummy <- dummyVars("~ .", data=test_df)
+test <- data.frame(predict(dummy, newdata = test_df))
+
+```
+
+## Modeling Churn, Model Specification and validation
+
+The prediction task is a classification task. That is to say that given features unique to a particular employee that we observed in the time span we were able to observe them, we wish to label each employee as having ‘churned’ or ‘not churned’, without having observed whether they actually churned or not churned.
+
+We will consider two models to carry out this classification churn. 
+- We will utilize logistic regression first, since besides a linear probability model it is one of the easiest models to implement and explain. It provides estimates of the coefficients that correspond to different features and estimates of their p-values, which can be suggestive of their importance for predicting churn. 
+- We also consider a Random Forest model, which is a tree based model that uses bagging to determine the best way to partition observations and the response variable so as to accurately predict the response variable. We consider a Random Forest model in addition to a logistic regression model because we can more readily determine which features are important using methods specific to random forests, which we will cover in more detail later. We also note that Random Forest models can readily detect non-linear relationships in the data and model them. This is not the case with logistic regression. One would have to inspect plots of variables against other variables to parse out non-linear relationships and specify such relationships in the equation. 
+
+
+First, we run a logistic regression model of the form: 
+$$ logit[\widehat{did\_churn}=1]= \alpha + Work\_Location\_Borough + Pay\_Basis + accused\_of\_misconduct +  median\_ot\_hours_worked +  LineOfDuty + median\_total\_crime\_count  +  agency\_start\_fy  + median\_total\_gross\_pay $$
+
+
+```{r}
+
+mylogit <- glm(did_churn ~ ., data = train, family = "binomial")
+summary(mylogit)
+hitmiss(mylogit)
+mylogit_data <- mylogit$model
+
+# validating model
+different_cutoffs <- seq(from = 0, to = 1, by = 0.05)
+misclass_rate <- rep(NA,length(different_cutoffs))
+
+for(i in seq_along(different_cutoffs)){
+    preds <- predict(mylogit, newdata=validation, type = 'response')
+    predicted_classes <-ifelse(preds > different_cutoffs[i], 1, 0)
+    cMatrix <- table(predicted_classes,validation$did_churn)
+    misclass_rate[i] <- 1 - sum(diag(cMatrix)) / sum(cMatrix)   
+}
+
+optimal_cutoffs_1 <- data.frame(different_cutoffs,misclass_rate)
+optimal_cutoff_row<- 
+  optimal_cutoffs_1[optimal_cutoffs_1$misclass_rate==min(misclass_rate),]
+
+
+# What's the optimal cutoff?
+
+optimal_cutoff <- 
+  optimal_cutoff_row$different_cutoffs # optimal cutoff is 0.55
+
+# Is the training performance better than guessing at random? 
+# Is the training performance better than just predicting zero all the time?
+
+preds1 <- fitted(mylogit)
+predicted_classes_1 <- ifelse(preds1 > optimal_cutoff, 1, 0)
+mean(predicted_classes_1 
+     != mylogit_data$did_churn)  # classification error rate of null model
+mean(predicted_classes_1)
+mean(mylogit_data$did_churn)
+preds2 <- rep(0,length(predicted_classes_1))
+
+# classification error rate of null model
+mean(preds2 != mylogit_data$did_churn) 
+
+# difference in classification error rates between model with features and
+# null model
+mean(preds2 != mylogit_data$did_churn)-
+  mean(predicted_classes_1 != mylogit_data$did_churn)
+
+
+```
+Our model estimated that work_location_borough, LineOfDuty, median_total_gross_pay, and median_ot_hours_worked were highly significant.
+The variable agency_start_fy was somewhat significant. in regards to the variables our model found to be significant, we were right about the signs of all of the significant variables.
+
+We compare the accuracy of our logistic regression model on our training set, which has been validated by finding the optimal cutoff value to translate a prediction to churned or not, to the accuracy of the null model guesses randomly (but proportional to observed frequency of) churn. The accuracy of the null model was 88.68%. The accuracy of the model we fitted on the training set was 91.93%. It may seem that our model is a good model by this metric.
+
+## Model Evaluation on Test Set
+```{r}
+preds_test <- predict(mylogit, newdata=test, type = 'response')
+predicted_classes_test <- ifelse(preds_test > optimal_cutoff, 1, 0)
+mean(predicted_classes_test != test$did_churn)
+
+test_1 <- test[complete.cases(test),]
+mean(predicted_classes_test)
+mean(test_1$did_churn)
+```
+We get similar results when evaluating our data on the test set. The accuracy of the model we fitted on the training set was 91.93%. On the test set, the accuracy was `r 1-0.07176483`. We are not concerned about over fitting, since we have gotten similar accuracy metrics. Over fitting occurs when your algorithm is too closely fitted to your training set that it can not generalize well to new/unseen data, because it is picking up on some of the 'noise' (variability/randomness) in the training set. 
+
+We revisit the discussion of whether the logistic regression equation was a good fit. We note that the model tends to underestimate the proportion of individuals who churned, likely because our model might have a higher proportion of false positives than the null model would. in the dataset the algorithm was applied to, the base rate of turnover/churn was `r mean(test_1$did_churn)`. Our model estimated churn to be lower at `r mean(predicted_classes_test)`. Taking this into account, we do not think our model does a good job at predicting churn, since underestimating churn is likely to be costlier than estimating churn accurately or overestimating churn by a little bit. After all, it can be hard to fill a position, reorganize teams, and train people to replace those who have turn.
+
+To conclude our section on logistic regression, we conduct a likelihood ratio test to test the null hypothesis that the model we specified is a not a better fit to the data than the null model that assumes independence between the response variable of did_churn and other features in the data set. The p-value of this test was so close to zero that r did not estimate it to precise values. Our probability being so close to zero is strong evidence that the model we specified is preferable to an intercept only model.
+```{r}
+
+null_model <- glm(did_churn ~ 1, data = mylogit_data, family = "binomial")
+anova(null_model,mylogit,test="Chisq")
+
+```
+
+## Model Improvements
+- Random Forrest
+  -   We utilize random forest to see which features are most important and if we can build a model that might stop underpredicting churn. 
+```{r}
+train1 <- train
+train1$did_churn <- as.factor(train1$did_churn)
+
+validation1 <- validation
+validation1$did_churn <- as.factor(validation1$did_churn)
+
+test1 <- test
+test1$did_churn <- as.factor(test1$did_churn)
+
+
+ntrees <- seq(100,500,by=100)
+test_errors <- rep(NA,length(ntrees))
+
+
+for(i in seq_along(ntrees)){
+  rf_classifier <-randomForest(did_churn~.,
+                               data=train1, 
+                               ntree=ntrees[i]
+                               ,na.action = na.exclude,importance=T) 
+  val_preds <- predict(rf_classifier, validation1, type="response")
+  test_errors[i] <- mean(val_preds != validation1$did_churn)
+}
+
+class_error_df <- data.frame(numb_trees=ntrees, class_error = test_errors)
+validated_num_of_trees <- 
+  class_error_df[which.min(class_error_df$class_error),"numb_trees"]
+print(validated_num_of_trees)
+
+
+rf_classifier_final <- randomForest(did_churn~.,
+                                    data=train1, 
+                                    ntree=validated_num_of_trees,
+                                    na.action = na.exclude,
+                                    importance=T)
+
+rf_preds <- predict(rf_classifier_final, test1, type="response")
+
+# What is the mean of the predictions?
+mean(as.numeric(as.character(rf_preds)))
+
+# What is the confusion matrix?
+cMatrix <- confusionMatrix(data=rf_preds, reference = test1$did_churn)
+cMatrix
+
+# What is the error rate?
+ mean(rf_preds != test1$did_churn)
+
+```
+
+
+
+```{r}
+varImpPlot(rf_classifier_final)
+```
+
+# Summary/Conclusion
+
+
+
+ 
+ 
